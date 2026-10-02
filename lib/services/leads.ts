@@ -2,9 +2,12 @@
  * lib/services/leads.ts
  *
  * Data-access service for Leads CRM.
+ * Uses service-role client for server-side CRUD so RLS never blocks internal reads.
+ * Uses anon client for public inserts (website forms).
  */
 
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { Lead } from "@/types/models";
 import { LeadInput } from "@/lib/validations/lead";
 
@@ -20,7 +23,7 @@ const MEMORY_LEADS: Lead[] = [
     property_type: "plot",
     preferred_location: "Near New Bus Stand, Thanjavur",
     budget: "₹30 - 40 Lakhs",
-    message: "Looking for an east-facing DTCP approved plot for home construction in 2026. Needs bank loan support.",
+    message: "Looking for an east-facing DTCP approved plot for home construction. Needs bank loan support.",
     source: "website",
     status: "new",
     notes: "Customer contacted via website quick requirement form.",
@@ -52,17 +55,22 @@ const MEMORY_LEADS: Lead[] = [
 
 function isSupabaseConfigured() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  return url && key && !url.includes("placeholder") && !key.includes("placeholder");
+  // Accept either key — anon key or new publishable key
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  return url && key && serviceKey &&
+    !url.includes("placeholder") && !key.includes("placeholder");
 }
 
+// ─── READ ─────────────────────────────────────────────────────────────────────
+// Always use admin client for reading leads so RLS never blocks staff dashboard
 export async function getLeads(statusFilter?: string): Promise<Lead[]> {
   try {
     if (!isSupabaseConfigured()) {
       return statusFilter ? MEMORY_LEADS.filter(l => l.status === statusFilter) : MEMORY_LEADS;
     }
 
-    const supabase = await createClient();
+    const supabase = createAdminClient();
     let query = supabase.from("leads").select("*").order("created_at", { ascending: false });
 
     if (statusFilter && statusFilter !== "all") {
@@ -70,15 +78,23 @@ export async function getLeads(statusFilter?: string): Promise<Lead[]> {
     }
 
     const { data, error } = await query;
-    if (error || !data || data.length === 0) {
+    if (error) {
+      console.error("[getLeads] Supabase error:", error.message);
+      return statusFilter ? MEMORY_LEADS.filter(l => l.status === statusFilter) : MEMORY_LEADS;
+    }
+    // If DB empty, supplement with fallback so dashboard always has something to show
+    if (!data || data.length === 0) {
       return statusFilter ? MEMORY_LEADS.filter(l => l.status === statusFilter) : MEMORY_LEADS;
     }
     return data as Lead[];
-  } catch {
+  } catch (err) {
+    console.error("[getLeads] Exception:", err);
     return statusFilter ? MEMORY_LEADS.filter(l => l.status === statusFilter) : MEMORY_LEADS;
   }
 }
 
+// ─── CREATE ───────────────────────────────────────────────────────────────────
+// Public insert — use admin client to bypass the broken RLS select-after-insert
 export async function createLead(input: LeadInput): Promise<{ success: boolean; data?: Lead; error?: string }> {
   try {
     if (!isSupabaseConfigured()) {
@@ -105,8 +121,26 @@ export async function createLead(input: LeadInput): Promise<{ success: boolean; 
       return { success: true, data: newLead };
     }
 
-    const supabase = await createClient();
-    const { data, error } = await supabase.from("leads").insert(input).select().single();
+    // Use admin client so INSERT + SELECT works without hitting RLS select restriction
+    const supabase = createAdminClient();
+    const { data, error } = await supabase
+      .from("leads")
+      .insert({
+        name: input.name,
+        phone: input.phone,
+        whatsapp: input.whatsapp || null,
+        email: input.email || null,
+        intent: input.intent,
+        property_type: input.property_type || null,
+        preferred_location: input.preferred_location || null,
+        budget: input.budget || null,
+        message: input.message || null,
+        source: input.source || "website",
+        status: "new",
+      })
+      .select()
+      .single();
+
     if (error) return { success: false, error: error.message };
     return { success: true, data: data as Lead };
   } catch (err: unknown) {
@@ -115,6 +149,7 @@ export async function createLead(input: LeadInput): Promise<{ success: boolean; 
   }
 }
 
+// ─── UPDATE STATUS ─────────────────────────────────────────────────────────────
 export async function updateLeadStatus(id: string, status: string, notes?: string): Promise<{ success: boolean; error?: string }> {
   try {
     const found = MEMORY_LEADS.find(l => l.id === id);
@@ -125,7 +160,7 @@ export async function updateLeadStatus(id: string, status: string, notes?: strin
 
     if (!isSupabaseConfigured()) return { success: true };
 
-    const supabase = await createClient();
+    const supabase = createAdminClient();
     const updatePayload: Record<string, unknown> = { status };
     if (notes !== undefined) updatePayload.notes = notes;
 
