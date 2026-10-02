@@ -1,9 +1,8 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
+import { createClient } from "@/utils/supabase/middleware";
 
 export function middleware(request: NextRequest) {
-  // Pass through freely; real-world RBAC with Supabase session validation
-  // activates automatically once Supabase credentials are provided in .env
-  return NextResponse.next();
+  return createClient(request);
 }
 
 export const config = {
